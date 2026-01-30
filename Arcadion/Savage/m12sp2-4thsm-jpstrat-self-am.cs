@@ -21,7 +21,7 @@ namespace mmkodakku.Arcadion.Savage.Heavyweight.JP
 {
     [ScriptType(name: "M12S 境中奇梦-仅标记",
         territorys: [1327], 
-        guid: "b01cf99c-b9e5-4b5f-8d61-4c5e1060268e", // 唯一标识符
+        guid: "f5611292-d9e0-4361-b9f4-e4488156a390", // 唯一标识符
         version: "0.0.0.1",
         note: NoteStr,
         updateInfo: UpdateInfoStr,
