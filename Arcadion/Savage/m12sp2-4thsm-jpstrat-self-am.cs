@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Collections.Concurrent;
@@ -19,28 +20,29 @@ using Lumina.Data.Parsing;
 
 namespace mmkodakku.Arcadion.Savage.Heavyweight.JP
 {
-    [ScriptType(name: "M12S 境中奇梦-仅标记",
+    [ScriptType(name: "M4S 境中奇梦-仅标记 (拟人延迟版)",
         territorys: [1327], 
-        guid: "f5611292-d9e0-4361-b9f4-e4488156a390", // 唯一标识符
-        version: "0.0.0.1",
+        guid: "d1d8375c-75e4-49a8-8764-aab85a982f0d", // 更新GUID以区分旧版
+        version: "0.0.1.2",
         note: NoteStr,
         updateInfo: UpdateInfoStr,
-        author: "meowmi(special thanks灵视)")]
-    public class AAC_Heavyweight_M4_Savage_SimpleMark
+        author: "Meowmi（Special Thanks Cicero）")]
+    public class AAC_Heavyweight_M12_Savage_SimpleMark_Delay
     {
         // --- 常量定义区域 ---
         const string NoteStr =
         """
-        境中奇梦 (本体四运) 专用标记脚本。
+        M12S 境中奇梦 (四运) 日野专用标记脚本。
+        
         功能：
-        仅在四运开始时，检测连线分身的初始位置，根据方位对自己进行标记（日野Game8攻略）。
-        不包含任何绘图、TTS或自动移动指引。
+        在四运开始时，检测连线分身位置并标记自己。
+        新增“拟人延迟”功能，防止秒标被怀疑。
         """;
 
         const string UpdateInfoStr =
         """
-        0.0.1.1: 代码结构规范化，增加用户开关。
-        0.0.1.0: 初始版本。
+        0.0.0.2: 新增自定义固定延迟与随机延迟功能，模拟人工操作。
+        0.0.0.1: 代码结构规范化。
         """;
 
         // --- 用户设置区域 (User Settings) ---
@@ -48,16 +50,26 @@ namespace mmkodakku.Arcadion.Savage.Heavyweight.JP
         [UserSetting("启用脚本功能")]
         public bool EnableScript { get; set; } = true;
 
+        [UserSetting("启用随机延迟 (模拟人工)")]
+        public bool EnableRandomDelay { get; set; } = true;
+
+        [UserSetting("固定延迟 (毫秒) - 仅在关闭随机延迟时生效", 1000, 3000)] 
+        public int FixedDelay { get; set; } = 1500;
+
+        [UserSetting("随机延迟最小值 (毫秒)", 1000, 3000)]
+        public int RandomMin { get; set; } = 1000;
+
+        [UserSetting("随机延迟最大值 (毫秒)", 1000, 5000)]
+        public int RandomMax { get; set; } = 3000;
+
         [UserSetting("调试模式 (输出详细日志)")]
         public bool DebugMode { get; set; } = false;
 
         // --- 内部变量区域 ---
         
-        // 标记：是否进入了四运阶段
         private volatile bool _isInPhase4 = false;
-        
-        // 场地中心常数
         private static readonly Vector3 ArenaCenter = new Vector3(100, 0, 100);
+        private readonly Random _random = new Random();
 
         // --- 初始化 (Init) ---
 
@@ -68,56 +80,40 @@ namespace mmkodakku.Arcadion.Savage.Heavyweight.JP
 
         // --- 核心逻辑方法 (Script Methods) ---
 
-        /// <summary>
-        /// 阶段控制：监测 "境中奇梦" (Idyllic Dream) 读条 (ActionId: 46345)
-        /// </summary>
         [ScriptMethod(name: "四运阶段识别", eventType: EventTypeEnum.StartCasting, eventCondition: ["ActionId:46345"], userControl: false)]
         public void Phase4Control(Event @event, ScriptAccessory accessory)
         {
             if (!EnableScript) return;
-
             _isInPhase4 = true;
-            
-            if (DebugMode)
-            {
-                accessory.Log.Debug("检测到境中奇梦读条，标记逻辑已激活。");
-            }
+            if (DebugMode) accessory.Log.Debug("检测到境中奇梦读条，标记逻辑已激活。");
         }
 
-        /// <summary>
-        /// 核心逻辑：监听连线 (Tether ID: 0175) 并标记
-        /// </summary>
-        [ScriptMethod(name: "初始分身标记", eventType: EventTypeEnum.Tether, eventCondition: ["Id:0175"])]
+        [ScriptMethod(name: "初始分身标记 (含延迟)", eventType: EventTypeEnum.Tether, eventCondition: ["Id:0175"])]
         public void MarkBasedOnInitialClone(Event @event, ScriptAccessory accessory)
         {
-            // 基础检查：脚本开关、阶段检查
             if (!EnableScript || !_isInPhase4) return;
 
-            // 1. 目标检查：连线目标必须是“我”
+            // 1. 目标检查
             if (!TryParseObjectId(@event["TargetId"], out var targetId)) return;
-            if (targetId != accessory.Data.Me) return;
+            // 提前获取 Data.Me，避免在 Task 中访问 Accessor 可能存在的线程安全问题
+            uint myId = accessory.Data.Me; 
+            if (targetId != myId) return;
 
-            // 2. 来源检查：连线源头必须是分身 (DataId: 19210)
+            // 2. 来源检查
             if (!TryParseObjectId(@event["SourceId"], out var sourceId)) return;
             var sourceObject = accessory.Data.Objects.SearchById(sourceId);
             if (sourceObject == null || sourceObject.DataId != 19210) return;
 
-            // 3. 数据解析：获取分身坐标
+            // 3. 数据解析
             Vector3 sourcePosition;
             try
             {
                 sourcePosition = JsonConvert.DeserializeObject<Vector3>(@event["SourcePosition"]);
             }
-            catch (Exception ex)
-            {
-                if (DebugMode) accessory.Log.Debug($"[M4S定制] 坐标解析失败: {ex.Message}");
-                return;
-            }
+            catch { return; }
 
-            // 4. 方位计算 (0-7)
+            // 4. 计算逻辑 (主线程快速完成)
             int directionIndex = GetDirectionIndex(sourcePosition, ArenaCenter, 8);
-
-            // 5. 标记映射逻辑
             MarkType markToSet = directionIndex switch
             {
                 0 => MarkType.Attack4, // N
@@ -128,49 +124,49 @@ namespace mmkodakku.Arcadion.Savage.Heavyweight.JP
                 5 => MarkType.Bind1,   // SW
                 6 => MarkType.Bind2,   // W
                 7 => MarkType.Attack3, // NW
-                _ => MarkType.Attack1  // 默认 Fallback
+                _ => MarkType.Attack1
             };
 
-            // 6. 执行标记
-            accessory.Method.Mark(accessory.Data.Me, markToSet);
+            // 5. 延迟执行逻辑 (拟人化核心)
+            int delayMs = FixedDelay;
+            
+            if (EnableRandomDelay)
+            {
+                // 简单的容错处理，防止 Min > Max 导致报错
+                int min = Math.Min(RandomMin, RandomMax);
+                int max = Math.Max(RandomMin, RandomMax);
+                delayMs = _random.Next(min, max);
+            }
 
             if (DebugMode)
             {
-                accessory.Log.Debug($"连线方位: {directionIndex}, 执行标记: {markToSet}");
+                accessory.Log.Debug($"计算完成。方位:{directionIndex}, 标记:{markToSet}, 将在 {delayMs}ms 后执行。");
             }
+
+            // 开启后台任务进行等待和标记，不阻塞主线程
+            Task.Run(async () =>
+            {
+                await Task.Delay(delayMs);
+                accessory.Method.Mark(myId, markToSet);
+                if (DebugMode) accessory.Log.Debug($"延迟结束，已执行标记。");
+            });
         }
 
-        // --- 辅助方法 (Helpers) ---
+        // --- 辅助方法 ---
 
-        /// <summary>
-        /// 解析 16 进制 ObjectId
-        /// </summary>
         private static bool TryParseObjectId(string? rawHexId, out ulong result)
         {
             result = 0;
             if (string.IsNullOrWhiteSpace(rawHexId)) return false;
-            
             string hexId = rawHexId.Trim();
-            if (hexId.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            {
-                hexId = hexId.Substring(2);
-            }
-            
+            if (hexId.StartsWith("0x", StringComparison.OrdinalIgnoreCase)) hexId = hexId.Substring(2);
             return ulong.TryParse(hexId, System.Globalization.NumberStyles.HexNumber, null, out result);
         }
 
-        /// <summary>
-        /// 计算坐标方位索引 (0 = 北, 顺时针增加)
-        /// </summary>
         private static int GetDirectionIndex(Vector3 position, Vector3 center, int numberOfDirections)
         {
-            // Atan2 返回的是 (-PI, PI]
             double angle = Math.Atan2(position.X - center.X, position.Z - center.Z);
-            
-            // 将角度转换为 0 到 numberOfDirections-1 的索引
-            // 游戏坐标系通常 Z 轴向下为正，需要根据具体数学库调整，但此处沿用原脚本验证过的算法
             double faction = (numberOfDirections / 2.0d) - (numberOfDirections / 2.0d) * angle / Math.PI;
-            
             return (int)((Math.Round(faction) % numberOfDirections + numberOfDirections) % numberOfDirections);
         }
     }
